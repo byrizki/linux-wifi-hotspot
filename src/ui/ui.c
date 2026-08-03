@@ -41,6 +41,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "util.h"
 #include "about_ui.h"
 #include "qr_ui.h"
+#include <libayatana-appindicator/app-indicator.h>
 
 #define BUFSIZE 512
 #define AP_ENABLED "AP-ENABLED"
@@ -55,6 +56,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define ERROR_GATEWAY_MSG "Invalid gateway IP address"
 
 #define DEFAULT_GATEWAY_IP "192.168.12.1"
+#define INDICATOR_ID "wihotspot"
+#define INDICATOR_ICON_ACTIVE "wihotspot-active"
+#define INDICATOR_ICON_INACTIVE "wihotspot-inactive"
+#define INDICATOR_ICON_TRANSITION "wihotspot-transition"
+#define INDICATOR_ICON_PATH "/usr/share/icons/hicolor/scalable/apps"
 
 GtkBuilder *builder;
 GObject *window;
@@ -103,6 +109,11 @@ GtkCheckButton *cb_ieee80211ax;
 GtkProgressBar *progress_bar;
 
 GtkLabel *label_status;
+GtkMenuItem *item_indicator_status;
+GtkMenuItem *item_indicator_window;
+GtkMenuItem *item_indicator_hotspot;
+GtkApplication *application;
+AppIndicator *indicator;
 GtkLabel *label_input_error;
 
 GtkCssProvider* provider;
@@ -129,6 +140,156 @@ char* running_info[3];
 guint pb_pulse_id;
 static ConfigValues configValues;
 
+typedef enum {
+    HOTSPOT_STATUS_UNKNOWN,
+    HOTSPOT_STATUS_INACTIVE,
+    HOTSPOT_STATUS_STARTING,
+    HOTSPOT_STATUS_ACTIVE,
+    HOTSPOT_STATUS_STOPPING,
+    HOTSPOT_STATUS_ERROR
+} HotspotStatus;
+
+static HotspotStatus hotspot_status = HOTSPOT_STATUS_UNKNOWN;
+
+static void on_stop_hp_clicked(GtkWidget *widget, gpointer data);
+
+static void present_window(void) {
+    gtk_widget_show_all(GTK_WIDGET(window));
+    gtk_window_present(GTK_WINDOW(window));
+    if (item_indicator_window != NULL)
+        gtk_menu_item_set_label(item_indicator_window, "Hide Wi Hotspot");
+}
+
+void present_main_window(void) {
+    if (window != NULL)
+        present_window();
+}
+
+static gboolean hide_window_on_delete(GtkWidget *widget, GdkEvent *event, gpointer data) {
+    (void) event;
+    (void) data;
+    gtk_widget_hide(widget);
+    if (item_indicator_window != NULL)
+        gtk_menu_item_set_label(item_indicator_window, "Show Wi Hotspot");
+    return TRUE;
+}
+
+static void notify_hotspot(const char *title, const char *body) {
+    GNotification *notification = g_notification_new(title);
+    g_notification_set_body(notification, body);
+    g_application_send_notification(G_APPLICATION(application), NULL, notification);
+    g_object_unref(notification);
+}
+
+static const char *status_icon(HotspotStatus status) {
+    switch (status) {
+        case HOTSPOT_STATUS_ACTIVE: return INDICATOR_ICON_ACTIVE;
+        case HOTSPOT_STATUS_STARTING:
+        case HOTSPOT_STATUS_STOPPING: return INDICATOR_ICON_TRANSITION;
+        default: return INDICATOR_ICON_INACTIVE;
+    }
+}
+
+static const char *status_text(HotspotStatus status) {
+    switch (status) {
+        case HOTSPOT_STATUS_INACTIVE: return "Hotspot inactive";
+        case HOTSPOT_STATUS_STARTING: return "Starting hotspot…";
+        case HOTSPOT_STATUS_ACTIVE: return "Hotspot active";
+        case HOTSPOT_STATUS_STOPPING: return "Stopping hotspot…";
+        case HOTSPOT_STATUS_ERROR: return "Hotspot error";
+        default: return "Checking hotspot…";
+    }
+}
+
+static gboolean apply_hotspot_status(gpointer data) {
+    HotspotStatus status = GPOINTER_TO_INT(data);
+    HotspotStatus previous = hotspot_status;
+    hotspot_status = status;
+    gtk_menu_item_set_label(item_indicator_status, status_text(status));
+
+    if (status == HOTSPOT_STATUS_ACTIVE) {
+        gtk_menu_item_set_label(item_indicator_hotspot, "Stop Hotspot");
+        gtk_widget_set_sensitive(GTK_WIDGET(item_indicator_hotspot), TRUE);
+    } else if (status == HOTSPOT_STATUS_INACTIVE || status == HOTSPOT_STATUS_ERROR) {
+        gtk_menu_item_set_label(item_indicator_hotspot, "Start Hotspot");
+        gtk_widget_set_sensitive(GTK_WIDGET(item_indicator_hotspot), TRUE);
+    } else {
+        gtk_widget_set_sensitive(GTK_WIDGET(item_indicator_hotspot), FALSE);
+    }
+
+    app_indicator_set_icon_full(indicator, status_icon(status), status_text(status));
+    if (status == HOTSPOT_STATUS_ACTIVE) {
+        if (previous != HOTSPOT_STATUS_ACTIVE && previous != HOTSPOT_STATUS_UNKNOWN)
+            notify_hotspot("Wi Hotspot active", "Your hotspot is ready for connections.");
+    } else {
+        if (status == HOTSPOT_STATUS_INACTIVE && previous == HOTSPOT_STATUS_STOPPING)
+            notify_hotspot("Wi Hotspot stopped", "Hotspot is no longer running.");
+        else if (status == HOTSPOT_STATUS_ERROR && previous == HOTSPOT_STATUS_STARTING)
+            notify_hotspot("Wi Hotspot failed", "Check hotspot settings and system logs.");
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static void set_hotspot_status(HotspotStatus status) {
+    g_idle_add(apply_hotspot_status, GINT_TO_POINTER(status));
+}
+
+static void on_indicator_toggle_window(GtkMenuItem *item, gpointer data) {
+    (void) item;
+    (void) data;
+    if (gtk_widget_get_visible(GTK_WIDGET(window))) {
+        gtk_widget_hide(GTK_WIDGET(window));
+        gtk_menu_item_set_label(item_indicator_window, "Show Wi Hotspot");
+    } else {
+        present_window();
+        gtk_menu_item_set_label(item_indicator_window, "Hide Wi Hotspot");
+    }
+}
+
+static void on_indicator_toggle_hotspot(GtkMenuItem *item, gpointer data) {
+    (void) item;
+    (void) data;
+    if (hotspot_status == HOTSPOT_STATUS_ACTIVE)
+        on_stop_hp_clicked(NULL, NULL);
+    else if (hotspot_status == HOTSPOT_STATUS_INACTIVE || hotspot_status == HOTSPOT_STATUS_ERROR)
+        on_create_hp_clicked(NULL, NULL);
+}
+
+static void on_indicator_quit(GtkMenuItem *item, gpointer data) {
+    (void) item;
+    (void) data;
+    g_application_quit(G_APPLICATION(application));
+}
+
+static void init_indicator(void) {
+    GtkWidget *menu = gtk_menu_new();
+    GtkWidget *show_item = gtk_menu_item_new_with_label("Hide Wi Hotspot");
+    GtkWidget *hotspot_item = gtk_menu_item_new_with_label("Start Hotspot");
+    GtkWidget *separator = gtk_separator_menu_item_new();
+    GtkWidget *quit_item = gtk_menu_item_new_with_label("Quit");
+
+    indicator = app_indicator_new_with_path(INDICATOR_ID, INDICATOR_ICON_INACTIVE,
+                                            APP_INDICATOR_CATEGORY_APPLICATION_STATUS,
+                                            INDICATOR_ICON_PATH);
+    item_indicator_status = GTK_MENU_ITEM(gtk_menu_item_new_with_label("Checking hotspot…"));
+    gtk_widget_set_sensitive(GTK_WIDGET(item_indicator_status), FALSE);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), GTK_WIDGET(item_indicator_status));
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), show_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), hotspot_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), separator);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), quit_item);
+    gtk_widget_show_all(menu);
+
+    item_indicator_window = GTK_MENU_ITEM(show_item);
+    item_indicator_hotspot = GTK_MENU_ITEM(hotspot_item);
+    gtk_widget_set_sensitive(hotspot_item, FALSE);
+    g_signal_connect(show_item, "activate", G_CALLBACK(on_indicator_toggle_window), NULL);
+    g_signal_connect(hotspot_item, "activate", G_CALLBACK(on_indicator_toggle_hotspot), NULL);
+    g_signal_connect(quit_item, "activate", G_CALLBACK(on_indicator_quit), NULL);
+    app_indicator_set_title(indicator, "Wi Hotspot");
+    app_indicator_set_menu(indicator, GTK_MENU(menu));
+    app_indicator_set_status(indicator, APP_INDICATOR_STATUS_ACTIVE);
+}
 
 
 static void *stopHp(void *) {
@@ -157,6 +318,7 @@ static void on_create_hp_clicked(GtkWidget *widget, gpointer data) {
     }
 
 
+    set_hotspot_status(HOTSPOT_STATUS_STARTING);
     startShell(build_wh_mkconfig_command(&configValues));
 
     g_thread_new("shell_create_hp", run_create_hp_shell, (void*)build_wh_from_config());
@@ -165,6 +327,7 @@ static void on_create_hp_clicked(GtkWidget *widget, gpointer data) {
 }
 
 static void on_stop_hp_clicked(GtkWidget *widget, gpointer data) {
+    set_hotspot_status(HOTSPOT_STATUS_STOPPING);
     g_thread_new("shell2", stopHp, NULL);
 
 }
@@ -392,10 +555,14 @@ static void *update_freq_toggle(){
 }
 
 
-int initUi(int argc, char *argv[]){
+int initUi(GtkApplication *app){
+    if (window != NULL) {
+        present_window();
+        return 0;
+    }
 
+    application = app;
     XInitThreads();
-    gtk_init(&argc, &argv);
 
     /* Construct a GtkBuilder instance and load our UI description */
 
@@ -405,7 +572,8 @@ int initUi(int argc, char *argv[]){
 
     /* Connect signal handlers to the constructed widgets. */
     window = gtk_builder_get_object(builder, "window");
-    g_signal_connect (window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
+    gtk_window_set_application(GTK_WINDOW(window), application);
+    g_signal_connect(window, "delete-event", G_CALLBACK(hide_window_on_delete), NULL);
 
 
     button_create_hp = (GtkButton *) gtk_builder_get_object(builder, "button_create_hp");
@@ -452,6 +620,7 @@ int initUi(int argc, char *argv[]){
 
     progress_bar = (GtkProgressBar *) gtk_builder_get_object(builder, "progress_bar");
 
+    init_indicator();
     loadStyles();
     init_style_contexts();
 
@@ -490,9 +659,6 @@ int initUi(int argc, char *argv[]){
 
     init_interface_list();
     init_ui_from_config();
-
-
-    gtk_main();
 
     return 0;
 }
@@ -721,6 +887,7 @@ void* init_running_info(void *){
 
     if(running_info[0]!=NULL){
 
+        set_hotspot_status(HOTSPOT_STATUS_ACTIVE);
         char a[BUFSIZE];
         snprintf(a,BUFSIZE,"Running as PID: %s",running_info[0]);
         gtk_label_set_label(label_status,a);
@@ -731,6 +898,7 @@ void* init_running_info(void *){
 
     } else{
 
+        set_hotspot_status(hotspot_status == HOTSPOT_STATUS_STARTING ? HOTSPOT_STATUS_ERROR : HOTSPOT_STATUS_INACTIVE);
         gtk_label_set_label(label_status,"Not running");
         lock_all_views(FALSE);
         lock_running_views(FALSE);

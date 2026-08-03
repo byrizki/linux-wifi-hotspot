@@ -37,6 +37,10 @@
     cd linux-wifi-hotspot/src/scripts
     make install
 
+Repeat installs preserve an existing `/etc/create_ap.conf`. The bundled defaults are
+installed as `/usr/share/doc/create_ap/create_ap.conf.example`; remove the live
+configuration manually only when a full settings reset is intended.
+
 ### ArchLinux
 
     pacman -S create_ap

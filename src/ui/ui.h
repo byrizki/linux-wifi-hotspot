@@ -40,7 +40,8 @@ typedef struct {
     GtkEntry *pass;
 } WIData;
 
-int initUi(int argc, char *argv[]);
+int initUi(GtkApplication *app);
+void present_main_window(void);
 
 void init_ui_from_config();
 
