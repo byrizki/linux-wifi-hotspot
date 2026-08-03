@@ -105,10 +105,8 @@ const char *build_wh_mkconfig_command(ConfigValues* cv){
 
     snprintf(cmd_mkconfig, BUFSIZE, "%s %s %s %s '%s' '%s' %s %s",SUDO, CREATE_AP, cv->iface_wifi, cv->iface_inet, cv->ssid, cv->pass,MKCONFIG,config_ffile_name);
 
-    if(cv->freq!=NULL){
-        strcat(cmd_mkconfig," --freq-band ");
-        strcat(cmd_mkconfig,cv->freq);
-    }
+    strcat(cmd_mkconfig," --freq-band ");
+    strcat(cmd_mkconfig,cv->freq != NULL ? cv->freq : "default");
 
     if(cv->no_virt!=NULL && (strcmp(cv->no_virt,"1") == 0))
         strcat(cmd_mkconfig," --no-virt ");
