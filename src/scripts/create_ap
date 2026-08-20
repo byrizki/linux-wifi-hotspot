@@ -684,6 +684,7 @@ FIX_UNMANAGED=0
 LIST_RUNNING=0
 STOP_ID=
 LIST_CLIENTS_ID=
+RUN_ACTION=
 
 STORE_CONFIG=
 LOAD_CONFIG=
@@ -1049,7 +1050,7 @@ write_config() {
     done >> "$STORE_CONFIG"
 
     echo -e "Config options written to '$STORE_CONFIG'"
-    exit 0
+    [[ -z "$RUN_ACTION" ]] && exit 0
 }
 
 is_config_opt() {
@@ -1103,7 +1104,7 @@ for ((i=0; i<$#; i++)); do
     fi
 done
 
-GETOPT_ARGS=$(getopt -o hc:w:g:de:nm: -l "help","hidden","hostapd-debug:","hostapd-timestamps","redirect-to-localhost","mac-filter","mac-filter-accept:","isolate-clients","ieee80211n","ieee80211ac","ieee80211ax","ht_capab:","vht_capab:","driver:","no-virt","fix-unmanaged","country:","freq-band:","mac:","dhcp-dns:","daemon","pidfile:","logfile:","dns-logfile:","stop:","list","list-running","list-clients:","version","psk","no-haveged","no-dns","no-dnsmasq","mkconfig:","config:","dhcp-hosts:" -n "$PROGNAME" -- "$@")
+GETOPT_ARGS=$(getopt -o hc:w:g:de:nm: -l "help","hidden","hostapd-debug:","hostapd-timestamps","redirect-to-localhost","mac-filter","mac-filter-accept:","isolate-clients","ieee80211n","ieee80211ac","ieee80211ax","ht_capab:","vht_capab:","driver:","no-virt","fix-unmanaged","country:","freq-band:","mac:","dhcp-dns:","daemon","pidfile:","logfile:","dns-logfile:","stop:","list","list-running","list-clients:","version","psk","no-haveged","no-dns","no-dnsmasq","mkconfig:","config:","dhcp-hosts:","run-action:" -n "$PROGNAME" -- "$@")
 [[ $? -ne 0 ]] && exit 1
 eval set -- "$GETOPT_ARGS"
 
@@ -1312,6 +1313,11 @@ while :; do
             shift
             shift
             ;;
+        --run-action)
+            shift
+            RUN_ACTION="$1"
+            shift
+            ;;
         --)
             shift
             break
@@ -1333,6 +1339,20 @@ if [[ -n "$LOAD_CONFIG" && $# -eq 0 ]]; then
     done
 fi
 
+if [[ -n "$RUN_ACTION" ]]; then
+    case "$RUN_ACTION" in
+        start)
+            [[ -n "$LOAD_CONFIG" || -n "$STORE_CONFIG" ]] || die "--run-action start requires --config or --mkconfig"
+            ;;
+        stop)
+            STOP_ID="all"
+            ;;
+        *)
+            die "Unknown --run-action value: $RUN_ACTION"
+            ;;
+    esac
+fi
+
 # Check if required number of positional args are present
 if [[ $# -lt 1 && $FIX_UNMANAGED -eq 0  && -z "$STOP_ID" &&
       $LIST_RUNNING -eq 0 && -z "$LIST_CLIENTS_ID" ]]; then
@@ -1347,13 +1367,20 @@ fi
 
 trap "cleanup_lock" EXIT
 
-if [[ $(id -u) -ne 0 ]]; then
-    echo "create_ap must be run as root." >&2
+if ! init_lock; then
+    echo "ERROR: Failed to initialize lock" >&2
     exit 1
 fi
 
-if ! init_lock; then
-    echo "ERROR: Failed to initialize lock" >&2
+# Listing reads only world-readable runtime metadata. Keep it unprivileged so
+# GUI status refreshes do not repeatedly prompt through PolicyKit.
+if [[ $LIST_RUNNING -eq 1 ]]; then
+    list_running
+    exit 0
+fi
+
+if [[ $(id -u) -ne 0 ]]; then
+    echo "create_ap must be run as root." >&2
     exit 1
 fi
 
@@ -1365,20 +1392,21 @@ trap "die" SIGUSR2
 
 [[ -n "$STORE_CONFIG" ]] && write_config "$@"
 
-if [[ $LIST_RUNNING -eq 1 ]]; then
-    #echo -e "List of running $PROGNAME instances:\n"
-    list_running
-    exit 0
-fi
-
 if [[ -n "$LIST_CLIENTS_ID" ]]; then
     list_clients "$LIST_CLIENTS_ID"
     exit 0
 fi
 
 if [[ -n "$STOP_ID" ]]; then
-    echo "Trying to kill $PROGNAME instance associated with $STOP_ID..."
-    send_stop "$STOP_ID"
+    if [[ "$STOP_ID" == "all" ]]; then
+        for pid in $(list_running | awk '{print $1}'); do
+            echo "Trying to kill $PROGNAME instance associated with $pid..."
+            send_stop "$pid"
+        done
+    else
+        echo "Trying to kill $PROGNAME instance associated with $STOP_ID..."
+        send_stop "$STOP_ID"
+    fi
     exit 0
 fi
 

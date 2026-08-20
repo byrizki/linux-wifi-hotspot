@@ -837,6 +837,42 @@
           </packing>
         </child>
         <child>
+          <object class="GtkExpander" id="expander_log">
+            <property name="visible">True</property>
+            <property name="can-focus">True</property>
+            <property name="label" translatable="yes">Activity log</property>
+            <child>
+              <object class="GtkScrolledWindow" id="scroll_log">
+                <property name="visible">True</property>
+                <property name="can-focus">True</property>
+                <property name="shadow-type">in</property>
+                <property name="min-content-height">140</property>
+                <property name="hscrollbar-policy">automatic</property>
+                <property name="vscrollbar-policy">automatic</property>
+                <child>
+                  <object class="GtkTextView" id="tv_log">
+                    <property name="visible">True</property>
+                    <property name="can-focus">True</property>
+                    <property name="editable">False</property>
+                    <property name="cursor-visible">False</property>
+                    <property name="monospace">True</property>
+                    <property name="wrap-mode">word-char</property>
+                    <property name="left-margin">8</property>
+                    <property name="right-margin">8</property>
+                    <property name="top-margin">6</property>
+                    <property name="bottom-margin">6</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+          <packing>
+            <property name="expand">True</property>
+            <property name="fill">True</property>
+            <property name="position">8</property>
+          </packing>
+        </child>
+        <child>
           <object class="GtkBox">
             <property name="visible">True</property>
             <property name="can-focus">False</property>
@@ -875,7 +911,7 @@
             <property name="expand">False</property>
             <property name="fill">True</property>
             <property name="pack-type">end</property>
-            <property name="position">8</property>
+            <property name="position">9</property>
           </packing>
         </child>
       </object>

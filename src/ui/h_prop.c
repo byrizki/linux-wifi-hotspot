@@ -154,7 +154,7 @@ const char *build_wh_mkconfig_command(ConfigValues* cv){
         write_accepted_macs(cv->accepted_mac_file,cv->accepted_macs);
     }
 
-    printf("%s \n",cmd_mkconfig);
+    strcat(cmd_mkconfig, " --run-action start");
     return cmd_mkconfig;
 
 }
@@ -241,7 +241,7 @@ char * read_mac_filter_file(char * filename){
 static int init_get_running(){
 
     char cmd[BUFSIZE];
-    snprintf(cmd, BUFSIZE, "%s %s --list-running",SUDO, CREATE_AP);
+    snprintf(cmd, BUFSIZE, "%s --list-running", CREATE_AP);
 
     FILE *fp;
 

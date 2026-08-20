@@ -109,6 +109,8 @@ GtkCheckButton *cb_ieee80211ax;
 GtkProgressBar *progress_bar;
 
 GtkLabel *label_status;
+GtkTextView *tv_log;
+GtkTextBuffer *buffer_log;
 GtkMenuItem *item_indicator_status;
 GtkMenuItem *item_indicator_window;
 GtkMenuItem *item_indicator_hotspot;
@@ -152,6 +154,28 @@ typedef enum {
 static HotspotStatus hotspot_status = HOTSPOT_STATUS_UNKNOWN;
 
 static void on_stop_hp_clicked(GtkWidget *widget, gpointer data);
+void lock_all_views(gboolean set_lock);
+static guint start_pb_pulse(void);
+static void stop_pb_pulse(void);
+
+static gboolean append_log_line(gpointer data) {
+    char *line = data;
+    GtkTextIter end;
+
+    if (buffer_log != NULL) {
+        gtk_text_buffer_get_end_iter(buffer_log, &end);
+        gtk_text_buffer_insert(buffer_log, &end, line, -1);
+        gtk_text_buffer_insert(buffer_log, &end, "\n", 1);
+        gtk_text_buffer_get_end_iter(buffer_log, &end);
+        gtk_text_view_scroll_to_iter(tv_log, &end, 0.0, FALSE, 0.0, 1.0);
+    }
+    g_free(line);
+    return G_SOURCE_REMOVE;
+}
+
+static void log_line(const char *line) {
+    g_idle_add(append_log_line, g_strdup(line));
+}
 
 static void present_window(void) {
     gtk_widget_show_all(GTK_WIDGET(window));
@@ -206,6 +230,7 @@ static gboolean apply_hotspot_status(gpointer data) {
     HotspotStatus previous = hotspot_status;
     hotspot_status = status;
     gtk_menu_item_set_label(item_indicator_status, status_text(status));
+    log_line(status_text(status));
 
     if (status == HOTSPOT_STATUS_ACTIVE) {
         gtk_menu_item_set_label(item_indicator_hotspot, "Stop Hotspot");
@@ -293,11 +318,23 @@ static void init_indicator(void) {
 
 
 static void *stopHp(void *) {
+    char buf[BUFSIZE];
+    FILE *fp;
+
     if(running_info[0]!=NULL){
-        gtk_label_set_label(label_status,"Stopping ...");
-        start_pb_pulse();
-        lock_all_views(TRUE);
-        startShell(build_kill_create_ap_command(running_info[0]));
+        char command[BUFSIZE + 16];
+        snprintf(command, sizeof(command), "%s 2>&1", build_kill_create_ap_command(running_info[0]));
+        if ((fp = popen(command, "r")) == NULL) {
+            log_line("ERROR: Unable to stop hotspot command.");
+            g_thread_new("init_running",init_running_info,NULL);
+            return NULL;
+        }
+        while (fgets(buf, sizeof(buf), fp) != NULL) {
+            buf[strcspn(buf, "\n")] = 0;
+            log_line(buf);
+        }
+        if (pclose(fp) != 0)
+            log_line("ERROR: Stop command failed.");
         g_thread_new("init_running",init_running_info,NULL);
     }
     return 0;
@@ -319,15 +356,19 @@ static void on_create_hp_clicked(GtkWidget *widget, gpointer data) {
 
 
     set_hotspot_status(HOTSPOT_STATUS_STARTING);
-    startShell(build_wh_mkconfig_command(&configValues));
-
-    g_thread_new("shell_create_hp", run_create_hp_shell, (void*)build_wh_from_config());
+    lock_all_views(TRUE);
+    start_pb_pulse();
+    log_line("Requesting authorization to save settings and start hotspot…");
+    g_thread_new("shell_create_hp", run_create_hp_shell, (void*)build_wh_mkconfig_command(&configValues));
 
 
 }
 
 static void on_stop_hp_clicked(GtkWidget *widget, gpointer data) {
     set_hotspot_status(HOTSPOT_STATUS_STOPPING);
+    lock_all_views(TRUE);
+    start_pb_pulse();
+    log_line("Requesting authorization to stop hotspot…");
     g_thread_new("shell2", stopHp, NULL);
 
 }
@@ -592,8 +633,11 @@ int initUi(GtkApplication *app){
     entry_gateway = (GtkEntry *) gtk_builder_get_object(builder, "entry_gateway");
 
     tv_mac_filter = (GtkTextView *) gtk_builder_get_object(builder, "tv_mac_filter");
+    tv_log = (GtkTextView *) gtk_builder_get_object(builder, "tv_log");
 
     buffer_mac_filter = gtk_text_view_get_buffer (GTK_TEXT_VIEW (tv_mac_filter));
+    buffer_log = gtk_text_view_get_buffer(GTK_TEXT_VIEW(tv_log));
+    log_line("Wi Hotspot ready. Activity from start and stop commands appears here.");
 
     combo_wifi = (GtkComboBox *) gtk_builder_get_object(builder, "combo_wifi");
     combo_internet = (GtkComboBox *) gtk_builder_get_object(builder, "combo_internet");
@@ -876,84 +920,66 @@ void clear_running_info(){
         running_info[0]=NULL;
 }
 
-void* init_running_info(void *){
+static gboolean apply_running_info(gpointer data) {
+    char *pid = data;
 
-    clear_running_info();
-    lock_all_views(TRUE);
-
-    gtk_label_set_label(label_status,"Getting running info...");
-
-    get_h_running_info(running_info);
-
-    if(running_info[0]!=NULL){
-
+    if (pid != NULL) {
+        char status[BUFSIZE];
         set_hotspot_status(HOTSPOT_STATUS_ACTIVE);
-        char a[BUFSIZE];
-        snprintf(a,BUFSIZE,"Running as PID: %s",running_info[0]);
-        gtk_label_set_label(label_status,a);
-
+        snprintf(status, sizeof(status), "Running as PID: %s", pid);
+        gtk_label_set_label(label_status, status);
         lock_all_views(FALSE);
         lock_running_views(TRUE);
-
-
-    } else{
-
+    } else {
         set_hotspot_status(hotspot_status == HOTSPOT_STATUS_STARTING ? HOTSPOT_STATUS_ERROR : HOTSPOT_STATUS_INACTIVE);
-        gtk_label_set_label(label_status,"Not running");
+        gtk_label_set_label(label_status, "Not running");
         lock_all_views(FALSE);
         lock_running_views(FALSE);
     }
 
     stop_pb_pulse();
-    return 0;
+    g_free(pid);
+    return G_SOURCE_REMOVE;
+}
+
+void* init_running_info(void *){
+    char *pid;
+
+    clear_running_info();
+    get_h_running_info(running_info);
+    pid = running_info[0] == NULL ? NULL : g_strdup(running_info[0]);
+    g_idle_add(apply_running_info, pid);
+    return NULL;
 }
 
 
 static void *run_create_hp_shell(void *cmd) {
-
     char buf[BUFSIZE];
-    char buf2[BUFSIZE];
+    char command[BUFSIZE + 16];
     FILE *fp;
 
-    if(configValues.freq){
-        cmd = strcat( cmd, " --freq-band ");
-        cmd = strcat(cmd, configValues.freq);
-
-        if ((fp = popen(cmd, "r")) == NULL) {
-            printf("Error opening pipe!\n");
-            return NULL;
-        }
-    }
-    else{
-        if ((fp = popen(cmd, "r")) == NULL) {
-            printf("Error opening pipe!\n");
-            return NULL;
-        }
-    }
-
-
-
-    start_pb_pulse();
-
-    while (fgets(buf, BUFSIZE, fp) != NULL) {
-        buf[strcspn(buf, "\n")] = 0;
-        gtk_label_set_label(label_status,buf);
-
-        if (strstr(buf, AP_ENABLED) != NULL) {
-            init_running_info(NULL);
-            pclose(fp);
-            return 0;
-        }
-    }
-
-    if (pclose(fp)) {
-        printf("Command not found or exited with error status\n");
-        init_running_info(NULL);
+    snprintf(command, sizeof(command), "%s 2>&1", (const char *)cmd);
+    if ((fp = popen(command, "r")) == NULL) {
+        log_line("ERROR: Unable to start hotspot command.");
+        g_thread_new("init_running", init_running_info, NULL);
         return NULL;
     }
 
-    init_running_info(NULL);
-    return 0;
+    while (fgets(buf, sizeof(buf), fp) != NULL) {
+        buf[strcspn(buf, "\n")] = 0;
+        log_line(buf);
+
+        if (strstr(buf, AP_ENABLED) != NULL) {
+            g_thread_new("init_running", init_running_info, NULL);
+            pclose(fp);
+            return NULL;
+        }
+    }
+
+    if (pclose(fp) != 0)
+        log_line("ERROR: Start command failed. Read activity log above.");
+    g_thread_new("init_running", init_running_info, NULL);
+    return NULL;
 }
 
 
