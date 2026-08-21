@@ -135,15 +135,22 @@ get_avail_fd() {
     echo 0
 }
 
-# lock file for the mutex counter
-COUNTER_LOCK_FILE=/tmp/create_ap.$$.lock
+# Runtime lock files must be root-owned. Do not place them directly in /tmp:
+# an unprivileged status lookup can otherwise leave a lock inaccessible to
+# the privileged start/stop command.
+RUNTIME_DIR=/run/create_ap
+COUNTER_LOCK_FILE=$RUNTIME_DIR/create_ap.$$.lock
 
 cleanup_lock() {
     rm -f $COUNTER_LOCK_FILE
 }
 
 init_lock() {
-    local LOCK_FILE=/tmp/create_ap.all.lock
+    local LOCK_FILE=$RUNTIME_DIR/all.lock
+
+    # All callers that require locking have passed root validation.
+    # /run is recreated each boot and cannot be pre-created by another user.
+    install -d -m 755 "$RUNTIME_DIR" || return 1
 
     # we initialize only once
     [[ $LOCK_FD -ne 0 ]] && return 0
@@ -151,20 +158,14 @@ init_lock() {
     LOCK_FD=$(get_avail_fd)
     [[ $LOCK_FD -eq 0 ]] && return 1
 
-    # open/create lock file with write access for all users
-    # otherwise normal users will not be able to use it.
-    # to avoid race conditions on creation, we need to
-    # use umask to set the permissions.
-    umask 0555
+    umask 0077
     eval "exec $LOCK_FD>$LOCK_FILE" > /dev/null 2>&1 || return 1
     umask $SCRIPT_UMASK
-
-    # there is a case where lock file was created from a normal
-    # user. change the owner to root as soon as we can.
-    [[ $(id -u) -eq 0 ]] && chown 0:0 $LOCK_FILE
+    chown 0:0 "$LOCK_FILE"
+    chmod 600 "$LOCK_FILE"
 
     # create mutex counter lock file
-    echo 0 > $COUNTER_LOCK_FILE
+    echo 0 > "$COUNTER_LOCK_FILE"
 
     return $?
 }
@@ -871,20 +872,27 @@ list_running_conf() {
     mutex_unlock
 }
 
-list_running() {
+list_running_unlocked() {
     local IFACE wifi_iface x
-    mutex_lock
-    for x in $(list_running_conf); do
+    for x in /tmp/create_ap.*; do
+        if [[ ! -f $x/pid || ! -f $x/wifi_iface || ! -d /proc/$(cat "$x/pid") ]]; then
+            continue
+        fi
         IFACE=${x#*.}
         IFACE=${IFACE%%.*}
-        wifi_iface=$(cat $x/wifi_iface)
+        wifi_iface=$(cat "$x/wifi_iface")
 
         if [[ $IFACE == $wifi_iface ]]; then
-            echo $(cat $x/pid) $IFACE
+            echo $(cat "$x/pid") "$IFACE"
         else
-            echo $(cat $x/pid) $IFACE '('$(cat $x/wifi_iface)')'
+            echo $(cat "$x/pid") "$IFACE" "($(cat "$x/wifi_iface"))"
         fi
     done
+}
+
+list_running() {
+    mutex_lock
+    list_running_unlocked
     mutex_unlock
 }
 
@@ -1355,7 +1363,7 @@ fi
 
 # Check if required number of positional args are present
 if [[ $# -lt 1 && $FIX_UNMANAGED -eq 0  && -z "$STOP_ID" &&
-      $LIST_RUNNING -eq 0 && -z "$LIST_CLIENTS_ID" ]]; then
+      $LIST_RUNNING -eq 0 && -z "$LIST_CLIENTS_ID" && -z "$RUN_ACTION" ]]; then
     usage >&2
     exit 1
 fi
@@ -1365,22 +1373,28 @@ if [[ $NO_DNSMASQ -eq 1 ]]; then
   NO_DNS=1
 fi
 
-trap "cleanup_lock" EXIT
-
-if ! init_lock; then
-    echo "ERROR: Failed to initialize lock" >&2
-    exit 1
-fi
-
 # Listing reads only world-readable runtime metadata. Keep it unprivileged so
 # GUI status refreshes do not repeatedly prompt through PolicyKit.
 if [[ $LIST_RUNNING -eq 1 ]]; then
-    list_running
+    if [[ $(id -u) -eq 0 ]]; then
+        trap "cleanup_lock" EXIT
+        init_lock || die "Failed to initialize lock"
+        list_running
+    else
+        list_running_unlocked
+    fi
     exit 0
 fi
 
 if [[ $(id -u) -ne 0 ]]; then
     echo "create_ap must be run as root." >&2
+    exit 1
+fi
+
+trap "cleanup_lock" EXIT
+
+if ! init_lock; then
+    echo "ERROR: Failed to initialize lock" >&2
     exit 1
 fi
 
